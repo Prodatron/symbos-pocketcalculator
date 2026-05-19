@@ -65,4 +65,4 @@ errtxtstk_eng   db "Stack full",0
 
 
 ;### RESERVE
-ds 10
+ds 30

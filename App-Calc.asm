@@ -2,14 +2,13 @@
 ;@                                                                            @
 ;@             S y m b O S   -   P o c k e t  C a l c u l a t o r             @
 ;@                                                                            @
-;@             (c) 2004-2007 by Prodatron / SymbiosiS (Jörn Mika)             @
+;@          (c) 2004, 2007-2026 by Prodatron / SymbiosiS (Jörn Mika)          @
 ;@                                                                            @
 ;@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 relocate_start
 
 ;Todo
-;- cut/paste
 
 
 ;==============================================================================
@@ -81,7 +80,12 @@ sysprzn     db 3
 windatprz   equ 3
 prgwin      db 0
 
-prgprz  call prglng
+prgprz  ld a,(App_BegCode+47)
+        cp 3
+        jr nz,$+5
+        ld (prgwindat+0),a
+
+        call prglng
         call SySystem_HLPINI
         ld a,(App_PrcID)
         ld (prgwindat+windatprz),a
@@ -103,7 +107,10 @@ prgprz1 call msgdsk             ;get message -> IXL=status, IXH=sender process
         call FLO_DEGRAD
         jp inpres               ;reset calculator
 
-prgprz0 call msgget
+prgprz0 ld a,(edtlen)
+        or a
+        jp nz,edtchr
+        call msgget
         jr nc,prgprz0
         cp MSR_DSK_WCLICK       ;*** form control has been clicked
         jr nz,prgprz0
@@ -131,7 +138,7 @@ prgprz2 ld l,(iy+8)
         jp (hl)
 
 ;### PRGKEY -> Check key
-prgkeya equ 43
+prgkeya equ 45
 prgkeyt db "0":dw inpnu0
         db "1":dw inpnu1
         db "2":dw inpnu2
@@ -175,11 +182,22 @@ prgkeyt db "0":dw inpnu0
         db "|":dw fncsqt
         db "@":dw fncxp2
         db "#":dw fncxp3
+        db "C"-64:dw edtcop
+        db "V"-64:dw edtpst
 
-prgkey  ld hl,prgkeyt
+prgkey  ld d,(iy+4)
+        call SyDesktop_KEYINT   ;convert primary to international
+        jp c,prgprz0
+        push af
+prgkey3 jr z,prgkey4
+        ld d,0
+        call SyDesktop_KEYINT   ;ignore additional chars
+        jr prgkey3
+prgkey4 pop af
+
+prgkey0 ld hl,prgkeyt
         ld b,prgkeya
         ld de,3
-        ld a,(iy+4)
         call clclcs
 prgkey1 cp (hl)
         jr z,prgkey2
@@ -1167,6 +1185,56 @@ dspbrk3 ld de,8*256+256-2
 
 
 ;==============================================================================
+;### EDIT-ROUTINES ############################################################
+;==============================================================================
+
+edtmax  equ 32
+edtbuf  ds edtmax
+edtpos  dw 0
+edtlen  db 0
+
+;### EDTCOP -> copies current display into clipboard
+edtcop  ld hl,dsptxtval
+        push hl
+        call strlen                 ;HL=Stringende (0), BC=Länge (maximal 255, ohne Terminator)
+        dec hl
+        ld a,(dspchrcom)
+        cp (hl)
+        jr nz,edtcop1
+        dec c
+edtcop1 pop ix
+        push bc:pop iy
+        ld a,(App_BnkNum)
+        ld e,a
+        ld d,1
+        rst #20:dw jmp_bufput
+        jp prgprz0
+
+;### EDTPST -> copies clipboard into input
+edtpst  ld ix,edtbuf
+        ld (edtpos),ix
+        ld a,(App_BnkNum)
+        ld e,a
+        ld d,1
+        ld iy,edtmax
+        rst #20:dw jmp_bufget
+        jp c,prgprz0
+        call inpclr0
+        ld a,iyl
+;### EDTCHR -> copies one char from buffer to input
+edtchr  dec a
+        ld (edtlen),a
+        ld hl,(edtpos)
+        ld a,(dspchrpoi)
+        cp (hl)
+        ld a,(hl)
+        inc hl
+        ld (edtpos),hl
+        jp z,prgprz0
+        jp prgkey0
+
+
+;==============================================================================
 ;### SUB-ROUTINES #############################################################
 ;==============================================================================
 
@@ -1223,6 +1291,71 @@ hlpopn  ld a,(SySystem_HLPFLG)
         call msgsnd1
         jp prgprz0
 
+;******************************************************************************
+;*** Name           DesktopService_KeyboardInternational
+;*** Input          D  = Bit[0-6] primary charcode (28-127)
+;***                     Bit[7]   flag, if only codes 32-127 allowed
+;*** Output         E  = Bit[0]   =1 -> no char available
+;***                     Bit[6]   =1 -> last char, =0 -> more chars available 
+;***                - if E[bit0]=0
+;***                D  = international char
+;*** Destroyed      AF,BC,E,H,IX,IY
+;*** Description    [...]
+;******************************************************************************
+SyDesktop_KEYINT
+        ld a,DSK_SRV_KEYINT
+        ld c,MSC_DSK_DSKSRV
+        call SyDesktop_SendMessage
+SyDSrv1 call SyDesktop_WaitMessage
+        cp MSR_DSK_DSKSRV
+        jr nz,SyDSrv1
+        ld a,(iy+1)
+        cp DSK_SRV_KEYINT
+        jr nz,SyDSrv1
+        ld hl,(App_MsgBuf+2)
+        push hl:pop af
+        ret
+
+SyDesktop_SendMessage
+;******************************************************************************
+;*** Input          C  = Command
+;***                A  = Window ID
+;***                DE,HL = additional parameters
+;*** Output         -
+;*** Destroyed      AF,BC,DE,HL,IX,IY
+;*** Description    Sends a message to the desktop manager, which includes the
+;***                window ID and additional parameters
+;******************************************************************************
+        ld iy,App_MsgBuf
+        ld b,a
+        ld (App_MsgBuf+0),bc
+        ld (App_MsgBuf+2),de
+        ld (App_MsgBuf+4),hl
+        db #dd:ld h,PRC_ID_DESKTOP
+        ld a,(App_PrcID)
+        db #dd:ld l,a
+        rst #10
+        ret
+
+SyDesktop_WaitMessage
+;******************************************************************************
+;*** Input          -
+;*** Output         IY = message buffer
+;***                A  = first byte in the Message buffer (IY+0)
+;*** Destroyed      AF,BC,DE,HL,IX,IY
+;*** Description    Waits for a message coming from the Desktop Manager. Will
+;***                go to sleep state state until a message is received.
+;******************************************************************************
+        ld iy,App_MsgBuf
+SyDWMs1 db #dd:ld h,PRC_ID_DESKTOP
+        ld a,(App_PrcID)
+        db #dd:ld l,a
+        rst #08             ;wait for a desktop manager message
+        db #dd:dec l
+        jr nz,SyDWMs1
+        ld a,(App_MsgBuf+0)
+        ret
+
 ;### MSGGET -> Message für Programm abholen
 ;### Ausgabe    CF=0 -> keine Message vorhanden, CF=1 -> IXH=Absender, (recmsgb)=Message, A=(recmsgb+0), IY=recmsgb
 ;### Veraendert 
@@ -1269,6 +1402,21 @@ msgsnd1 db #dd:ld h,a
         ld (iy+4),l
         ld (iy+5),h
         rst #10
+        ret
+
+;### STRLEN -> Ermittelt Länge eines Strings
+;### Eingabe    HL=String (0-terminiert)
+;### Ausgabe    HL=Stringende (0), BC=Länge (maximal 255, ohne Terminator)
+;### Verändert  -
+strlen  push af
+        xor a
+        ld bc,255
+        cpir
+        ld a,254
+        sub c
+        ld c,a
+        dec hl
+        pop af
         ret
 
 ;### CLCLCS -> Lowercase
@@ -1391,10 +1539,10 @@ nolist
 
 ;### Misc
 prgmsginf1 db "Pocket Calculator for SymbOS",0
-prgtxtinf2  db " Version 1.1 (Build "
+prgmsginf2  db " Version 1.1 (Build "
 read "..\..\..\SRC-Main\build.asm"
             db "pdt)",0
-prgmsginf3 db " Copyright <c> 2025 SymbiosiS",0
+prgmsginf3 db " Copyright <c> 2026 SymbiosiS",0
 
 ;### Display
 dsptxtmem   db "M",0
@@ -1463,7 +1611,7 @@ App_MsgBuf ds 14
 
 ;### INFO-WINDOW ##############################################################
 
-prgmsginf  dw prgmsginf1,4*1+2,prgmsginf2,4*1+2,prgmsginf3,4*1+2,0,prgicnbig,prgicn16c
+prgmsginf   dw prgmsginf1,4*1+2, prgmsginf2,4*1+2, prgmsginf3,4*1+2, 0,prgicnbig,prgicn16c
 
 ;### MAIN-WINDOW ##############################################################
 
@@ -1471,7 +1619,7 @@ prgwindat dw #3501,0,50,30,150,86,0,0,150,86,150,86,150+52,86+14,prgicnsml,prgwi
 prgwindat0 dw prgwingrpa,0,0:ds 136+14
 
 prgwinmen  dw 3, 1+4,prgwinmentx1,prgwinmen1,0, 1+4,prgwinmentx2,prgwinmen2,0, 1+4,prgwinmentx3,prgwinmen3,0
-prgwinmen1 dw 2, 0,prgwinmen1tx1,000000,0, 0,prgwinmen1tx2,000000,0
+prgwinmen1 dw 2, 1,prgwinmen1tx1,edtcop,0, 1,prgwinmen1tx2,edtpst,0
 prgwinmen2 dw 8
 prgwinmen2a dw 1+2,prgwinmen2tx1,setnrm,0, 1,prgwinmen2tx2,setsci,0, 1+8,0,0,0
 prgwinmen2b dw 1+2,prgwinmen2tx3,setdeg,0, 1,prgwinmen2tx4,setrad,0, 1+8,0,0,0
